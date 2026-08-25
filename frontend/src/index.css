@@ -1,0 +1,103 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #FAFAFA;
+    color: #171717;
+  }
+}
+
+@layer components {
+  /* Card — enterprise flat style */
+  .card {
+    @apply bg-white border border-neutral-200 rounded p-5 transition-all duration-150;
+  }
+
+  /* Primary Button */
+  .btn-primary {
+    @apply bg-primary hover:bg-primary-dark active:bg-primary-active text-white font-medium
+           px-4 h-9 rounded text-sm transition-colors duration-100 flex items-center justify-center gap-2
+           disabled:bg-primary-muted disabled:text-neutral-400 disabled:cursor-not-allowed;
+  }
+
+  /* Secondary Button */
+  .btn-secondary {
+    @apply bg-white hover:bg-neutral-50 text-primary font-medium px-4 h-9 rounded text-sm
+           border border-primary transition-colors duration-100 flex items-center justify-center gap-2;
+  }
+
+  /* Ghost Button */
+  .btn-ghost {
+    @apply bg-transparent hover:bg-neutral-50 text-neutral-600 hover:text-neutral-900 font-medium
+           px-4 h-9 rounded text-sm border border-neutral-200 hover:border-neutral-300 transition-colors duration-100 flex items-center justify-center gap-2;
+  }
+
+  /* Danger Button */
+  .btn-danger {
+    @apply bg-white hover:bg-danger-bg text-danger font-medium px-4 h-9 rounded text-sm
+           border border-danger-border hover:border-red-400 transition-colors duration-100 flex items-center justify-center gap-2;
+  }
+
+  /* Input Fields */
+  .input {
+    @apply w-full px-3 h-9 bg-white border border-neutral-200 rounded text-sm
+           focus:outline-none focus:border-primary focus:ring-1 focus:ring-primary
+           text-neutral-900 placeholder-neutral-400
+           disabled:bg-neutral-50 disabled:cursor-not-allowed
+           transition-colors duration-100;
+  }
+
+  /* Status Badges — semantic only */
+  .badge {
+    @apply inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium
+           tracking-[0.02em];
+  }
+  .badge-approved  { @apply bg-success-bg text-success border border-success-border; }
+  .badge-pending   { @apply bg-warning-bg text-warning border border-warning-border; }
+  .badge-rejected  { @apply bg-danger-bg text-danger border border-danger-border; }
+  .badge-suspended { @apply bg-neutral-100 text-neutral-600 border border-neutral-200; }
+  .badge-info      { @apply bg-neutral-100 text-neutral-700 border border-neutral-200; }
+
+  /* Category pill — uniform, no color variation */
+  .badge-category {
+    @apply bg-neutral-100 text-neutral-600 border border-neutral-200 rounded
+           text-[11px] font-medium tracking-[0.02em] px-2 py-0.5;
+  }
+
+  /* Legacy aliases (mapped to semantic) */
+  .badge-blue   { @apply badge-info; }
+  .badge-gray   { @apply badge-suspended; }
+  .badge-green  { @apply badge-approved; }
+  .badge-red    { @apply badge-rejected; }
+  .badge-yellow { @apply badge-pending; }
+
+  /* Skeleton loader */
+  .skeleton {
+    @apply bg-neutral-200 animate-pulse rounded;
+  }
+}
+
+/* Scrollbar utilities */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hide::-webkit-scrollbar { display: none; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: #CBD5E1;
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: #94A3B8; }

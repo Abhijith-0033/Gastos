@@ -1,0 +1,12 @@
+{
+  "name": "gastos-app-store",
+  "version": "1.0.0",
+  "description": "Gastos App Store — Full-Featured Android App Store",
+  "private": true,
+  "scripts": {
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build:frontend": "npm run build --prefix frontend",
+    "start": "node backend/server.js"
+  }
+}
