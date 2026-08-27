@@ -78,6 +78,11 @@ app.use('/api/v1/developer', developerRoutes);
 app.use('/api/v1/developers', developersRoutes);
 app.use('/api/v1/admin', adminRoutes);
 
+// Root health probe for deployment platforms (Replit, Render, etc.)
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', app: 'gastos' });
+});
+
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
@@ -112,11 +117,11 @@ app.use((err, req, res, next) => {
 });
 
 // ── Start Server ──────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🏪 Gastos App Store Backend Server
-📡 Status: Running on http://localhost:${PORT}
+📡 Status: Running on port ${PORT} (0.0.0.0)
 🚀 Environment: ${process.env.NODE_ENV || 'development'}
 📂 Uploads directory: ${uploadsDir}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
