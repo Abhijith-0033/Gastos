@@ -1,12 +1,12 @@
 import jwt from 'jsonwebtoken';
-import { db } from '../database/db.js';
+import { queryOne } from '../database/db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'gastos_appstore_super_secret_jwt_key_2026_change_in_production';
 
 /**
  * Authenticate JWT token and attach user to req.user
  */
-export function authenticate(req, res, next) {
+export async function authenticate(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({ error: 'Access denied. No token provided.' });
@@ -15,7 +15,7 @@ export function authenticate(req, res, next) {
   const token = authHeader.split(' ')[1];
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    const user = db.prepare('SELECT id, username, email, role, display_name, is_active FROM users WHERE id = ?').get(decoded.id);
+    const user = await queryOne('SELECT id, username, email, role, display_name, is_active FROM users WHERE id = $1', [decoded.id]);
 
     if (!user) {
       return res.status(401).json({ error: 'User no longer exists.' });
@@ -38,13 +38,13 @@ export function authenticate(req, res, next) {
 /**
  * Optional authentication: attaches user if token is present, but allows guest
  */
-export function optionalAuth(req, res, next) {
+export async function optionalAuth(req, res, next) {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
     try {
       const decoded = jwt.verify(token, JWT_SECRET);
-      const user = db.prepare('SELECT id, username, email, role, display_name, is_active FROM users WHERE id = ?').get(decoded.id);
+      const user = await queryOne('SELECT id, username, email, role, display_name, is_active FROM users WHERE id = $1', [decoded.id]);
       if (user && user.is_active) {
         req.user = user;
       }

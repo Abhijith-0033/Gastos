@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { body, validationResult } from 'express-validator';
-import { db } from '../database/db.js';
+import { queryOne, queryRun } from '../database/db.js';
 import { optionalAuth } from '../middleware/auth.js';
 import { reviewLimiter } from '../middleware/rateLimiter.js';
 import { recalculateAppRating, createNotification } from '../utils/helpers.js';
@@ -57,7 +57,7 @@ router.post(
       const { rating, reviewer_name, reviewer_email, title, body: reviewBody, device_info } = req.body;
       const numRating = Number(rating);
 
-      const app = db.prepare("SELECT id, name, developer_id FROM apps WHERE slug = ? AND status = 'approved'").get(appSlug);
+      const app = await queryOne("SELECT id, name, developer_id FROM apps WHERE slug = $1 AND status = 'approved'", [appSlug]);
       if (!app) {
         return res.status(404).json({ error: 'App not found or not published.' });
       }
@@ -68,53 +68,54 @@ router.post(
       // Check if verified download
       let isVerifiedDownload = 0;
       if (userId) {
-        const dl = db.prepare('SELECT id FROM download_logs WHERE app_id = ? AND user_id = ?').get(app.id, userId);
+        const dl = await queryOne('SELECT id FROM download_logs WHERE app_id = $1 AND user_id = $2', [app.id, userId]);
         if (dl) isVerifiedDownload = 1;
       } else if (ip) {
-        const dl = db.prepare('SELECT id FROM download_logs WHERE app_id = ? AND ip_address = ?').get(app.id, ip);
+        const dl = await queryOne('SELECT id FROM download_logs WHERE app_id = $1 AND ip_address = $2', [app.id, ip]);
         if (dl) isVerifiedDownload = 1;
       }
 
       // Check store setting for auto-approve vs pending moderation
-      const settingRow = db.prepare("SELECT value FROM store_settings WHERE key = 'require_review_approval'").get();
+      const settingRow = await queryOne("SELECT value FROM store_settings WHERE key = 'require_review_approval'");
       const requireApproval = settingRow?.value === 'true';
       const status = requireApproval ? 'pending' : 'approved';
 
-      const result = db.prepare(`
-        INSERT INTO reviews (
+      const result = await queryOne(
+        `INSERT INTO reviews (
           app_id, user_id, reviewer_name, reviewer_email,
           rating, title, body, device_info, is_verified_download, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        app.id,
-        userId,
-        reviewer_name,
-        reviewer_email || null,
-        numRating,
-        title || null,
-        reviewBody || null,
-        device_info || null,
-        isVerifiedDownload,
-        status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+        [
+          app.id,
+          userId,
+          reviewer_name,
+          reviewer_email || null,
+          numRating,
+          title || null,
+          reviewBody || null,
+          device_info || null,
+          isVerifiedDownload,
+          status,
+        ]
       );
 
       // If auto-approved, recalculate rating now
       if (status === 'approved') {
-        recalculateAppRating(app.id);
+        await recalculateAppRating(app.id);
       }
 
       // Notify developer about the review
-      createNotification(
+      await createNotification(
         app.developer_id,
         `New ${numRating}★ Review for ${app.name}`,
         `"${reviewer_name}" gave your app ${numRating} stars: "${title || reviewBody?.slice(0, 40) || 'No text'}"`,
         'new_review',
-        { app_id: app.id, review_id: Number(result.lastInsertRowid) }
+        { app_id: app.id, review_id: Number(result.id) }
       );
 
       return res.status(201).json({
         message: status === 'approved' ? 'Thank you! Your review has been published.' : 'Thank you! Your review has been submitted for moderation.',
-        review_id: Number(result.lastInsertRowid),
+        review_id: Number(result.id),
         status,
       });
     } catch (err) {
@@ -128,16 +129,16 @@ router.post(
  * POST /api/v1/reviews/:id/helpful
  * Upvote review helpfulness
  */
-router.post('/:id/helpful', (req, res) => {
+router.post('/:id/helpful', async (req, res) => {
   try {
     const reviewId = Number(req.params.id);
 
-    const review = db.prepare('SELECT id, helpful_count FROM reviews WHERE id = ?').get(reviewId);
+    const review = await queryOne('SELECT id, helpful_count FROM reviews WHERE id = $1', [reviewId]);
     if (!review) {
       return res.status(404).json({ error: 'Review not found' });
     }
 
-    db.prepare('UPDATE reviews SET helpful_count = helpful_count + 1 WHERE id = ?').run(reviewId);
+    await queryRun('UPDATE reviews SET helpful_count = helpful_count + 1 WHERE id = $1', [reviewId]);
 
     return res.json({
       message: 'Marked as helpful',

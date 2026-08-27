@@ -2,7 +2,7 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
-import { db } from '../database/db.js';
+import { queryOne, queryRun } from '../database/db.js';
 import { authenticate } from '../middleware/auth.js';
 import { authLimiter } from '../middleware/rateLimiter.js';
 
@@ -42,46 +42,52 @@ router.post(
       .withMessage('Invalid role specified'),
   ],
   async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const { username, email, password, display_name, role = 'developer', bio, website } = req.body;
-
-    // Check existing username or email
-    const existing = db.prepare('SELECT id, username, email FROM users WHERE username = ? OR email = ?').get(username, email);
-    if (existing) {
-      if (existing.username.toLowerCase() === username.toLowerCase()) {
-        return res.status(409).json({ error: 'Username is already taken.' });
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
       }
-      return res.status(409).json({ error: 'An account with this email already exists.' });
+
+      const { username, email, password, display_name, role = 'developer', bio, website } = req.body;
+
+      // Check existing username or email
+      const existing = await queryOne('SELECT id, username, email FROM users WHERE username = $1 OR email = $2', [username, email]);
+      if (existing) {
+        if (existing.username.toLowerCase() === username.toLowerCase()) {
+          return res.status(409).json({ error: 'Username is already taken.' });
+        }
+        return res.status(409).json({ error: 'An account with this email already exists.' });
+      }
+
+      const password_hash = bcrypt.hashSync(password, 10);
+
+      const userRow = await queryOne(
+        `INSERT INTO users (username, email, password_hash, role, display_name, bio, website)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [username, email, password_hash, role, display_name, bio || null, website || null]
+      );
+
+      const user = {
+        id: userRow.id,
+        username,
+        email,
+        role,
+        display_name,
+      };
+
+      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, {
+        expiresIn: JWT_EXPIRES_IN,
+      });
+
+      res.status(201).json({
+        message: 'Account created successfully!',
+        token,
+        user,
+      });
+    } catch (err) {
+      console.error('Registration error:', err);
+      res.status(500).json({ error: 'Failed to register account: ' + err.message });
     }
-
-    const password_hash = bcrypt.hashSync(password, 10);
-
-    const result = db.prepare(`
-      INSERT INTO users (username, email, password_hash, role, display_name, bio, website)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(username, email, password_hash, role, display_name, bio || null, website || null);
-
-    const user = {
-      id: result.lastInsertRowid,
-      username,
-      email,
-      role,
-      display_name,
-    };
-
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET, {
-      expiresIn: JWT_EXPIRES_IN,
-    });
-
-    res.status(201).json({
-      message: 'Account created successfully!',
-      token,
-      user,
-    });
   }
 );
 
@@ -97,49 +103,54 @@ router.post(
     body('password').notEmpty().withMessage('Password is required'),
   ],
   async (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { email, password } = req.body;
+
+      const user = await queryOne('SELECT * FROM users WHERE email = $1', [email]);
+      if (!user) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+
+      if (!user.is_active) {
+        return res.status(403).json({ error: 'This account has been suspended. Please contact support.' });
+      }
+
+      const isMatch = bcrypt.compareSync(password, user.password_hash);
+      if (!isMatch) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
+
+      const token = jwt.sign(
+        { id: user.id, username: user.username, role: user.role },
+        JWT_SECRET,
+        { expiresIn: JWT_EXPIRES_IN }
+      );
+
+      const safeUser = {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+        display_name: user.display_name,
+        avatar_url: user.avatar_url,
+        bio: user.bio,
+        website: user.website,
+      };
+
+      res.json({
+        message: 'Logged in successfully',
+        token,
+        user: safeUser,
+      });
+    } catch (err) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Failed to login: ' + err.message });
     }
-
-    const { email, password } = req.body;
-
-    const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
-
-    if (!user.is_active) {
-      return res.status(403).json({ error: 'This account has been suspended. Please contact support.' });
-    }
-
-    const isMatch = bcrypt.compareSync(password, user.password_hash);
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
-
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      JWT_SECRET,
-      { expiresIn: JWT_EXPIRES_IN }
-    );
-
-    const safeUser = {
-      id: user.id,
-      username: user.username,
-      email: user.email,
-      role: user.role,
-      display_name: user.display_name,
-      avatar_url: user.avatar_url,
-      bio: user.bio,
-      website: user.website,
-    };
-
-    res.json({
-      message: 'Logged in successfully',
-      token,
-      user: safeUser,
-    });
   }
 );
 
@@ -163,25 +174,31 @@ router.put(
     body('bio').optional().trim(),
     body('website').optional().trim().isURL().withMessage('Must be a valid URL'),
   ],
-  (req, res) => {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { display_name, bio, website } = req.body;
+
+      await queryRun(
+        `UPDATE users
+         SET display_name = COALESCE($1, display_name),
+             bio = COALESCE($2, bio),
+             website = COALESCE($3, website),
+             updated_at = NOW()
+         WHERE id = $4`,
+        [display_name || null, bio || null, website || null, req.user.id]
+      );
+
+      const updated = await queryOne('SELECT id, username, email, role, display_name, bio, website, avatar_url FROM users WHERE id = $1', [req.user.id]);
+      res.json({ message: 'Profile updated', user: updated });
+    } catch (err) {
+      console.error('Profile update error:', err);
+      res.status(500).json({ error: 'Failed to update profile' });
     }
-
-    const { display_name, bio, website } = req.body;
-
-    db.prepare(`
-      UPDATE users
-      SET display_name = COALESCE(?, display_name),
-          bio = COALESCE(?, bio),
-          website = COALESCE(?, website),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).run(display_name, bio, website, req.user.id);
-
-    const updated = db.prepare('SELECT id, username, email, role, display_name, bio, website, avatar_url FROM users WHERE id = ?').get(req.user.id);
-    res.json({ message: 'Profile updated', user: updated });
   }
 );
 
@@ -189,28 +206,36 @@ router.put(
  * GET /api/v1/auth/check-username?username=xyz
  * Check if username is available
  */
-router.get('/check-username', (req, res) => {
-  const username = req.query.username?.toString().trim();
-  if (!username || username.length < 3) {
-    return res.json({ available: false, error: 'Username must be at least 3 characters' });
-  }
+router.get('/check-username', async (req, res) => {
+  try {
+    const username = req.query.username?.toString().trim();
+    if (!username || username.length < 3) {
+      return res.json({ available: false, error: 'Username must be at least 3 characters' });
+    }
 
-  const existing = db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').get(username);
-  res.json({ available: !existing });
+    const existing = await queryOne('SELECT id FROM users WHERE username ILIKE $1', [username]);
+    res.json({ available: !existing });
+  } catch (err) {
+    res.status(500).json({ available: false, error: err.message });
+  }
 });
 
 /**
  * GET /api/v1/auth/check-package?package_name=com.xyz
  * Check if package name is available
  */
-router.get('/check-package', (req, res) => {
-  const pkg = req.query.package_name?.toString().trim();
-  if (!pkg) {
-    return res.json({ available: false, error: 'Package name required' });
-  }
+router.get('/check-package', async (req, res) => {
+  try {
+    const pkg = req.query.package_name?.toString().trim();
+    if (!pkg) {
+      return res.json({ available: false, error: 'Package name required' });
+    }
 
-  const existing = db.prepare('SELECT id FROM apps WHERE package_name = ?').get(pkg);
-  res.json({ available: !existing });
+    const existing = await queryOne('SELECT id FROM apps WHERE package_name = $1', [pkg]);
+    res.json({ available: !existing });
+  } catch (err) {
+    res.status(500).json({ available: false, error: err.message });
+  }
 });
 
 export default router;

@@ -1,55 +1,77 @@
-import { DatabaseSync } from 'node:sqlite';
+import pg from 'pg';
 import bcrypt from 'bcryptjs';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+dotenv.config();
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'appstore.db');
-const dbDir = path.dirname(dbPath);
+const connectionString = process.env.DATABASE_URL;
 
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
+if (!connectionString) {
+  console.error('CRITICAL: DATABASE_URL environment variable is missing.');
 }
 
-// Initialize SQLite database connection using Node 22 native DatabaseSync
-export const db = new DatabaseSync(dbPath);
+// Create PostgreSQL connection pool
+export const pool = new pg.Pool({
+  connectionString,
+  ssl: connectionString && connectionString.includes('localhost') ? false : { rejectUnauthorized: false },
+  max: 20,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
+});
 
-// Helper for PRAGMA execution
-db.pragma = (pragmaStr) => {
+pool.on('error', (err) => {
+  console.error('Unexpected PostgreSQL Pool Error:', err);
+});
+
+/**
+ * Execute query and return single row
+ */
+export async function queryOne(text, params = []) {
+  const res = await pool.query(text, params);
+  return res.rows[0] || null;
+}
+
+/**
+ * Execute query and return all matching rows
+ */
+export async function queryAll(text, params = []) {
+  const res = await pool.query(text, params);
+  return res.rows;
+}
+
+/**
+ * Execute insert/update/delete query and return query result
+ */
+export async function queryRun(text, params = []) {
+  return pool.query(text, params);
+}
+
+/**
+ * Transaction wrapper with automated BEGIN / COMMIT / ROLLBACK
+ */
+export async function withTransaction(callback) {
+  const client = await pool.connect();
   try {
-    db.exec(`PRAGMA ${pragmaStr};`);
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
   } catch (err) {
-    console.warn(`Pragma warning (${pragmaStr}):`, err.message);
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-};
+}
 
-// Helper for atomic transactions
-db.transaction = (fn) => {
-  return (...args) => {
-    db.exec('BEGIN');
-    try {
-      const result = fn(...args);
-      db.exec('COMMIT');
-      return result;
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
-    }
-  };
-};
-
-// Enable WAL mode & Foreign Keys
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-export function initDatabase() {
-  db.exec(`
+/**
+ * Initialize PostgreSQL Schema
+ */
+export async function initDatabase() {
+  await pool.query(`
     -- Users table
     CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       username TEXT UNIQUE NOT NULL,
       email TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
@@ -59,24 +81,24 @@ export function initDatabase() {
       website TEXT,
       avatar_url TEXT,
       is_active INTEGER NOT NULL DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Categories table
     CREATE TABLE IF NOT EXISTS categories (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       name TEXT UNIQUE NOT NULL,
       slug TEXT UNIQUE NOT NULL,
       icon TEXT NOT NULL,
       description TEXT,
       sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Apps table
     CREATE TABLE IF NOT EXISTS apps (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       developer_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       slug TEXT UNIQUE NOT NULL,
@@ -92,24 +114,24 @@ export function initDatabase() {
       featured_order INTEGER DEFAULT 0,
       total_downloads INTEGER NOT NULL DEFAULT 0,
       total_reviews INTEGER NOT NULL DEFAULT 0,
-      average_rating REAL NOT NULL DEFAULT 0.0,
+      average_rating NUMERIC(3,1) NOT NULL DEFAULT 0.0,
       total_views INTEGER NOT NULL DEFAULT 0,
       current_version TEXT NOT NULL,
       version_code INTEGER NOT NULL,
-      apk_size_bytes INTEGER NOT NULL,
+      apk_size_bytes BIGINT NOT NULL,
       icon_url TEXT NOT NULL,
       banner_url TEXT,
       admin_notes TEXT,
-      submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      approved_at DATETIME,
-      rejected_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      submitted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      approved_at TIMESTAMP WITH TIME ZONE,
+      rejected_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- App tags
     CREATE TABLE IF NOT EXISTS app_tags (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       tag TEXT NOT NULL,
       UNIQUE(app_id, tag)
@@ -117,56 +139,56 @@ export function initDatabase() {
 
     -- App screenshots
     CREATE TABLE IF NOT EXISTS app_screenshots (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       url TEXT NOT NULL,
       caption TEXT,
       sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- App videos
     CREATE TABLE IF NOT EXISTS app_videos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       url TEXT NOT NULL,
       thumbnail_url TEXT,
       sort_order INTEGER DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- App permissions
     CREATE TABLE IF NOT EXISTS app_permissions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       permission TEXT NOT NULL,
       reason TEXT,
       is_dangerous INTEGER NOT NULL DEFAULT 0,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- App versions history
     CREATE TABLE IF NOT EXISTS app_versions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       version_name TEXT NOT NULL,
       version_code INTEGER NOT NULL,
       apk_url TEXT NOT NULL,
-      apk_size_bytes INTEGER NOT NULL,
+      apk_size_bytes BIGINT NOT NULL,
       min_android_version TEXT NOT NULL DEFAULT '6.0',
       whats_new TEXT,
       status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected')),
       is_current INTEGER NOT NULL DEFAULT 0,
       admin_notes TEXT,
-      submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      approved_at DATETIME,
-      rejected_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      submitted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      approved_at TIMESTAMP WITH TIME ZONE,
+      rejected_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Reviews table
     CREATE TABLE IF NOT EXISTS reviews (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       reviewer_name TEXT NOT NULL,
@@ -179,50 +201,50 @@ export function initDatabase() {
       helpful_count INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'approved' CHECK (status IN ('approved', 'pending', 'rejected', 'flagged')),
       admin_response TEXT,
-      admin_responded_at DATETIME,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      admin_responded_at TIMESTAMP WITH TIME ZONE,
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Download logs
     CREATE TABLE IF NOT EXISTS download_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       app_id INTEGER NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
       version_id INTEGER REFERENCES app_versions(id) ON DELETE SET NULL,
       user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
       ip_address TEXT,
       user_agent TEXT,
-      downloaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      downloaded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- In-app notifications
     CREATE TABLE IF NOT EXISTS notifications (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       title TEXT NOT NULL,
       body TEXT NOT NULL,
       type TEXT NOT NULL DEFAULT 'info' CHECK (type IN ('app_approved', 'app_rejected', 'version_approved', 'version_rejected', 'new_review', 'info', 'warning')),
       is_read INTEGER NOT NULL DEFAULT 0,
       data TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Admin audit trail
     CREATE TABLE IF NOT EXISTS admin_action_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      id SERIAL PRIMARY KEY,
       admin_id INTEGER NOT NULL REFERENCES users(id),
       action_type TEXT NOT NULL,
       target_type TEXT NOT NULL,
       target_id INTEGER,
       details TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Store key-value settings
     CREATE TABLE IF NOT EXISTS store_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
     );
 
     -- Performance indexes
@@ -241,44 +263,28 @@ export function initDatabase() {
   `);
 }
 
-export function seedDatabase(force = false) {
-  initDatabase();
+/**
+ * Seed database with initial system records
+ */
+export async function seedDatabase(force = false) {
+  await initDatabase();
 
   if (!force) {
-    const userRow = db.prepare('SELECT COUNT(*) as c FROM users').get();
+    const userRow = await queryOne('SELECT COUNT(*)::int as c FROM users');
     if (userRow && userRow.c > 0) {
-      console.log('Database already initialized. Skipping seed.');
+      console.log('PostgreSQL database already initialized. Skipping seed.');
       return;
     }
   }
 
-  console.log('Initializing database with clean authentic data & Gastos App...');
+  console.log('Initializing PostgreSQL database with authentic data & Gastos App...');
 
-  // Ensure upload subdirectories exist
-  const baseUpload = path.join(__dirname, '..', 'uploads');
-  const dirs = ['icons', 'banners', 'screenshots', 'videos', 'apks'];
-  dirs.forEach(d => {
-    const p = path.join(baseUpload, d);
-    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
-  });
-
-  const seedTransaction = db.transaction(() => {
+  await withTransaction(async (client) => {
     if (force) {
-      // Clear existing records
-      db.exec(`
-        DELETE FROM download_logs;
-        DELETE FROM reviews;
-        DELETE FROM notifications;
-        DELETE FROM admin_action_logs;
-        DELETE FROM app_permissions;
-        DELETE FROM app_videos;
-        DELETE FROM app_screenshots;
-        DELETE FROM app_tags;
-        DELETE FROM app_versions;
-        DELETE FROM apps;
-        DELETE FROM categories;
-        DELETE FROM users;
-        DELETE FROM store_settings;
+      await client.query(`
+        TRUNCATE download_logs, reviews, notifications, admin_action_logs, 
+                 app_permissions, app_videos, app_screenshots, app_tags, 
+                 app_versions, apps, categories, users, store_settings RESTART IDENTITY CASCADE;
       `);
     }
 
@@ -287,30 +293,19 @@ export function seedDatabase(force = false) {
     const adminPass = bcrypt.hashSync('Admin@2026', salt);
     const devPass = bcrypt.hashSync('Developer@2026', salt);
 
-    const insertUser = db.prepare(`
-      INSERT INTO users (username, email, password_hash, role, display_name, bio, website)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    insertUser.run(
-      'admin',
-      'admin@gastosstore.com',
-      adminPass,
-      'admin',
-      'Gastos Store Admin',
-      'Administrator of Gastos App Store',
-      'https://gastosstore.com'
+    const adminUserRes = await client.query(
+      `INSERT INTO users (username, email, password_hash, role, display_name, bio, website)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      ['admin', 'admin@gastosstore.com', adminPass, 'admin', 'Gastos Store Admin', 'Administrator of Gastos App Store', 'https://gastosstore.com']
     );
 
-    const devUser = insertUser.run(
-      'gastos_dev',
-      'developer@gastos.com',
-      devPass,
-      'developer',
-      'Gastos Team',
-      'Creators of smart, intuitive personal finance and expense tracking tools for India.',
-      'https://gastos.in'
+    const devUserRes = await client.query(
+      `INSERT INTO users (username, email, password_hash, role, display_name, bio, website)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      ['gastos_dev', 'developer@gastos.com', devPass, 'developer', 'Gastos Team', 'Creators of smart, intuitive personal finance and expense tracking tools for India.', 'https://gastos.in']
     );
+
+    const devUserId = devUserRes.rows[0].id;
 
     // 2. Create Categories
     const categories = [
@@ -326,109 +321,42 @@ export function seedDatabase(force = false) {
       { name: 'Travel', slug: 'travel', icon: '✈️', description: 'Trip planning, navigation, and local guides', sort_order: 10 },
     ];
 
-    const insertCat = db.prepare(`
-      INSERT INTO categories (name, slug, icon, description, sort_order)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
-    categories.forEach(c => insertCat.run(c.name, c.slug, c.icon, c.description, c.sort_order));
-    const financeCatId = db.prepare('SELECT id FROM categories WHERE slug = ?').get('finance').id;
-
-    // 3. Copy Real Assets for Gastos App
-    const workspaceRoot = path.resolve(__dirname, '..', '..', '..');
-    let apkSize = 134915612;
-    let apkDestRel = '/uploads/apks/gastos-v1.0.0.apk';
-    let iconDestRel = '/uploads/icons/gastos-icon.png';
-    let bannerDestRel = '/uploads/banners/gastos-banner.png';
-    let videoDestRel = '/uploads/videos/gastos-preview.mp4';
-    const screenshotRels = [];
-
-    // Copy APK
-    const srcApk = path.join(workspaceRoot, 'Gastos.apk');
-    const destApk = path.join(baseUpload, 'apks', 'gastos-v1.0.0.apk');
-    if (fs.existsSync(srcApk)) {
-      try {
-        fs.copyFileSync(srcApk, destApk);
-        apkSize = fs.statSync(destApk).size;
-      } catch (err) {
-        console.warn('Could not copy Gastos.apk:', err.message);
-      }
-    } else if (fs.existsSync(destApk)) {
-      apkSize = fs.statSync(destApk).size;
+    for (const c of categories) {
+      await client.query(
+        `INSERT INTO categories (name, slug, icon, description, sort_order) VALUES ($1, $2, $3, $4, $5)`,
+        [c.name, c.slug, c.icon, c.description, c.sort_order]
+      );
     }
 
-    // Copy Icon
-    const srcIcon = path.join(workspaceRoot, 'Gastos-logo (1)', 'profile.png');
-    const destIcon = path.join(baseUpload, 'icons', 'gastos-icon.png');
-    if (fs.existsSync(srcIcon)) {
-      fs.copyFileSync(srcIcon, destIcon);
-    }
+    const finCatRes = await client.query(`SELECT id FROM categories WHERE slug = $1`, ['finance']);
+    const financeCatId = finCatRes.rows[0].id;
 
-    // Copy Banner
-    const srcBanner = path.join(workspaceRoot, 'Gastos-logo (1)', 'cover.png');
-    const destBanner = path.join(baseUpload, 'banners', 'gastos-banner.png');
-    if (fs.existsSync(srcBanner)) {
-      fs.copyFileSync(srcBanner, destBanner);
-    }
+    // 3. Gastos App Default Data
+    const iconUrl = 'https://res.cloudinary.com/lyye3rqw/image/upload/v1724750000/gastos/icon.png';
+    const bannerUrl = 'https://res.cloudinary.com/lyye3rqw/image/upload/v1724750000/gastos/banner.png';
+    const apkUrl = 'https://res.cloudinary.com/lyye3rqw/raw/upload/v1724750000/gastos/Gastos.apk';
 
-    // Copy Video
-    const srcVideo = path.join(workspaceRoot, 'video.mp4');
-    const destVideo = path.join(baseUpload, 'videos', 'gastos-preview.mp4');
-    if (fs.existsSync(srcVideo)) {
-      try {
-        fs.copyFileSync(srcVideo, destVideo);
-      } catch (err) {
-        console.warn('Could not copy video.mp4:', err.message);
-      }
-    }
-
-    // Copy Screenshots
-    const srcImagesDir = path.join(workspaceRoot, 'Images');
-    if (fs.existsSync(srcImagesDir)) {
-      const files = fs.readdirSync(srcImagesDir);
-      files.forEach((f, idx) => {
-        if (f.endsWith('.jpeg') || f.endsWith('.jpg') || f.endsWith('.png')) {
-          const destName = `screenshot-${idx + 1}.jpeg`;
-          const destPath = path.join(baseUpload, 'screenshots', destName);
-          fs.copyFileSync(path.join(srcImagesDir, f), destPath);
-          screenshotRels.push(`/uploads/screenshots/${destName}`);
-        }
-      });
-    } else {
-      // Check existing in uploads
-      const existingSsDir = path.join(baseUpload, 'screenshots');
-      if (fs.existsSync(existingSsDir)) {
-        const files = fs.readdirSync(existingSsDir);
-        files.forEach((f) => {
-          if (f.endsWith('.jpeg') || f.endsWith('.jpg') || f.endsWith('.png')) {
-            screenshotRels.push(`/uploads/screenshots/${f}`);
-          }
-        });
-      }
-    }
-
-    // 4. Pre-seed Gastos App with real starting metrics (0 downloads, 0 reviews, 0 rating, 0 views)
-    const gastosAppResult = db.prepare(`
-      INSERT INTO apps (
+    const gastosAppResult = await client.query(
+      `INSERT INTO apps (
         developer_id, name, slug, package_name, tagline, description,
         category_id, content_rating, min_android_version, status,
         is_featured, is_editors_choice, featured_order, total_downloads,
         total_reviews, average_rating, total_views, current_version,
         version_code, apk_size_bytes, icon_url, banner_url, submitted_at, approved_at
       ) VALUES (
-        ?, ?, ?, ?, ?, ?,
-        ?, ?, ?, 'approved',
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, 'approved',
         1, 1, 1, 0,
         0, 0.0, 0, '1.0.0',
-        1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-    `).run(
-      devUser.lastInsertRowid,
-      'Gastos — Smart Expense Tracker & Finance Manager',
-      'gastos-expense-tracker',
-      'com.gastos.app',
-      'Smart Indian Expense & Budget Tracker with Multi-Account & EMI Planning',
-      `Gastos is India's most comprehensive, offline-first personal expense tracker and budget planner. Built with precision for Indian financial habits, Gastos empowers you to take complete control of your finances without invasive permissions or complex spreadsheets.
+        1, $10, $11, $12, NOW(), NOW()
+      ) RETURNING id`,
+      [
+        devUserId,
+        'Gastos — Smart Expense Tracker & Finance Manager',
+        'gastos-expense-tracker',
+        'com.gastos.app',
+        'Smart Indian Expense & Budget Tracker with Multi-Account & EMI Planning',
+        `Gastos is India's most comprehensive, offline-first personal expense tracker and budget planner. Built with precision for Indian financial habits, Gastos empowers you to take complete control of your finances without invasive permissions or complex spreadsheets.
 
 **Key Features:**
 • **Multi-Account Tracking**: Manage Bank Accounts, UPI Wallets, Cash, Credit Cards, and Savings in one unified dashboard.
@@ -438,34 +366,24 @@ export function seedDatabase(force = false) {
 • **Visual Financial Analytics**: Deep interactive charts showing monthly spending breakdowns, cash flow trends, and net worth progression.
 • **100% Privacy & Offline**: Your sensitive financial data resides safely on your local device. No third-party data selling.
 • **Dark Mode & Intuitive UI**: Beautiful, battery-friendly interface designed for speed and clarity.`,
-      financeCatId,
-      'Everyone',
-      '6.0',
-      apkSize,
-      iconDestRel,
-      bannerDestRel
+        financeCatId,
+        'Everyone',
+        '6.0',
+        134915612,
+        iconUrl,
+        bannerUrl
+      ]
     );
 
-    const gastosAppId = gastosAppResult.lastInsertRowid;
+    const gastosAppId = gastosAppResult.rows[0].id;
 
-    // 5. Add Tags
+    // Tags
     const tags = ['Finance', 'Expense Tracker', 'Budget', 'Money Manager', 'EMI Planner', 'India', 'Offline', 'UPI', 'Net Worth'];
-    const insertTag = db.prepare('INSERT INTO app_tags (app_id, tag) VALUES (?, ?)');
-    tags.forEach(t => insertTag.run(gastosAppId, t));
-
-    // 6. Add Screenshots
-    const insertScreenshot = db.prepare('INSERT INTO app_screenshots (app_id, url, caption, sort_order) VALUES (?, ?, ?, ?)');
-    screenshotRels.forEach((url, idx) => {
-      insertScreenshot.run(gastosAppId, url, `Gastos App Screen ${idx + 1}`, idx + 1);
-    });
-
-    // 7. Add Video
-    if (fs.existsSync(destVideo)) {
-      db.prepare('INSERT INTO app_videos (app_id, url, thumbnail_url, sort_order) VALUES (?, ?, ?, ?)')
-        .run(gastosAppId, videoDestRel, bannerDestRel, 1);
+    for (const t of tags) {
+      await client.query(`INSERT INTO app_tags (app_id, tag) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [gastosAppId, t]);
     }
 
-    // 8. Add Permissions
+    // Permissions
     const permissions = [
       { permission: 'INTERNET', reason: 'Used for backup sync and exchange rate updates', dangerous: 0 },
       { permission: 'VIBRATE', reason: 'Tactile haptic feedback on numeric keypad input', dangerous: 0 },
@@ -475,34 +393,43 @@ export function seedDatabase(force = false) {
       { permission: 'WRITE_EXTERNAL_STORAGE', reason: 'Save local backup snapshots to internal storage', dangerous: 1 }
     ];
 
-    const insertPerm = db.prepare('INSERT INTO app_permissions (app_id, permission, reason, is_dangerous) VALUES (?, ?, ?, ?)');
-    permissions.forEach(p => insertPerm.run(gastosAppId, p.permission, p.reason, p.dangerous));
+    for (const p of permissions) {
+      await client.query(
+        `INSERT INTO app_permissions (app_id, permission, reason, is_dangerous) VALUES ($1, $2, $3, $4)`,
+        [gastosAppId, p.permission, p.reason, p.dangerous]
+      );
+    }
 
-    // 9. Add Version 1.0.0
-    db.prepare(`
-      INSERT INTO app_versions (
+    // Version 1.0.0
+    await client.query(
+      `INSERT INTO app_versions (
         app_id, version_name, version_code, apk_url, apk_size_bytes,
         min_android_version, whats_new, status, is_current, submitted_at, approved_at
       ) VALUES (
-        ?, '1.0.0', 1, ?, ?,
+        $1, '1.0.0', 1, $2, $3,
         '6.0', '🚀 Initial Public Launch! Full expense tracking, budget goals, EMI calculation, and analytics dashboard.',
-        'approved', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-      )
-    `).run(gastosAppId, apkDestRel, apkSize);
+        'approved', 1, NOW(), NOW()
+      )`,
+      [gastosAppId, apkUrl, 134915612]
+    );
 
-    // 10. Add Store Settings
-    const insertSetting = db.prepare('INSERT INTO store_settings (key, value) VALUES (?, ?)');
-    insertSetting.run('store_name', 'Gastos App Store');
-    insertSetting.run('store_tagline', 'Premium Android Apps, Carefully Reviewed');
-    insertSetting.run('require_review_approval', 'false');
-    insertSetting.run('max_apk_size_mb', '150');
-    insertSetting.run('max_screenshots', '8');
-    insertSetting.run('maintenance_mode', 'false');
+    // Store settings
+    const settings = [
+      ['store_name', 'Gastos App Store'],
+      ['store_tagline', 'Premium Android Apps, Carefully Reviewed'],
+      ['require_review_approval', 'false'],
+      ['max_apk_size_mb', '150'],
+      ['max_screenshots', '8'],
+      ['maintenance_mode', 'false'],
+    ];
+
+    for (const [key, value] of settings) {
+      await client.query(
+        `INSERT INTO store_settings (key, value) VALUES ($1, $2) ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value`,
+        [key, value]
+      );
+    }
   });
 
-  seedTransaction();
-  console.log('Database initialized cleanly without mock data!');
+  console.log('PostgreSQL database initialized cleanly with default data!');
 }
-
-// Auto-init schema on module load
-initDatabase();

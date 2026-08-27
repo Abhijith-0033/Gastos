@@ -1,40 +1,41 @@
 import multer from 'multer';
-import path from 'path';
-import fs from 'fs';
-import { fileURLToPath } from 'url';
+import { v2 as cloudinary } from 'cloudinary';
+import { CloudinaryStorage } from 'multer-storage-cloudinary';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const baseUploadDir = path.resolve(__dirname, '..', 'uploads');
-
-// Ensure base subdirectories exist
-['icons', 'banners', 'screenshots', 'videos', 'apks'].forEach(sub => {
-  const dir = path.join(baseUploadDir, sub);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// Configure disk storage
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    let subfolder = 'screenshots';
-    if (file.fieldname === 'icon') subfolder = 'icons';
-    else if (file.fieldname === 'banner') subfolder = 'banners';
-    else if (file.fieldname === 'apk') subfolder = 'apks';
-    else if (file.fieldname === 'video') subfolder = 'videos';
+const storage = new CloudinaryStorage({
+  cloudinary: cloudinary,
+  params: async (req, file) => {
+    let folder = 'gastos/screenshots';
+    let resource_type = 'image';
 
-    const uploadPath = path.join(baseUploadDir, subfolder);
-    cb(null, uploadPath);
-  },
-  filename: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    cb(null, `${file.fieldname}-${uniqueSuffix}${ext}`);
+    if (file.fieldname === 'icon') {
+      folder = 'gastos/icons';
+    } else if (file.fieldname === 'banner') {
+      folder = 'gastos/banners';
+    } else if (file.fieldname === 'apk') {
+      folder = 'gastos/apks';
+      resource_type = 'raw';
+    } else if (file.fieldname === 'video') {
+      folder = 'gastos/videos';
+      resource_type = 'video';
+    }
+
+    return {
+      folder,
+      resource_type,
+      public_id: `${file.fieldname}-${Date.now()}-${Math.round(Math.random() * 1e9)}`,
+    };
   },
 });
 
-// File filter validation
 const fileFilter = (req, file, cb) => {
-  const ext = path.extname(file.originalname).toLowerCase();
+  const ext = file.originalname.substring(file.originalname.lastIndexOf('.')).toLowerCase();
 
   if (file.fieldname === 'icon' || file.fieldname === 'banner' || file.fieldname === 'screenshots') {
     if (!['.jpg', '.jpeg', '.png', '.webp'].includes(ext)) {
@@ -56,11 +57,10 @@ export const upload = multer({
   storage,
   fileFilter,
   limits: {
-    fileSize: 150 * 1024 * 1024, // Max 150MB for APKs / Videos
+    fileSize: 150 * 1024 * 1024,
   },
 });
 
-// Predefined upload configurations
 export const appSubmissionUpload = upload.fields([
   { name: 'icon', maxCount: 1 },
   { name: 'banner', maxCount: 1 },
@@ -70,3 +70,4 @@ export const appSubmissionUpload = upload.fields([
 ]);
 
 export const versionUpload = upload.single('apk');
+export { cloudinary };

@@ -1,13 +1,10 @@
 import slugify from 'slugify';
-import sharp from 'sharp';
-import path from 'path';
-import fs from 'fs';
-import { db } from '../database/db.js';
+import { queryOne, queryRun } from '../database/db.js';
 
 /**
  * Generate a unique URL slug from a name string
  */
-export function generateUniqueSlug(name, tableName = 'apps', currentId = null) {
+export async function generateUniqueSlug(name, tableName = 'apps', currentId = null) {
   let baseSlug = slugify(name, { lower: true, strict: true, trim: true });
   if (!baseSlug) baseSlug = `app-${Date.now()}`;
 
@@ -15,15 +12,15 @@ export function generateUniqueSlug(name, tableName = 'apps', currentId = null) {
   let counter = 1;
 
   while (true) {
-    let query = `SELECT id FROM ${tableName} WHERE slug = ?`;
+    let query = `SELECT id FROM ${tableName} WHERE slug = $1`;
     let params = [slug];
 
     if (currentId) {
-      query += ' AND id != ?';
+      query += ' AND id != $2';
       params.push(currentId);
     }
 
-    const existing = db.prepare(query).get(...params);
+    const existing = await queryOne(query, params);
     if (!existing) break;
 
     slug = `${baseSlug}-${counter}`;
@@ -34,62 +31,31 @@ export function generateUniqueSlug(name, tableName = 'apps', currentId = null) {
 }
 
 /**
- * Process uploaded icon to 512x512 PNG format using Sharp
+ * Process uploaded icon (With Cloudinary, multer storage uploads directly to Cloudinary)
  */
-export async function processAppIcon(filePath) {
-  if (!fs.existsSync(filePath)) return null;
-
-  const parsed = path.parse(filePath);
-  const outPath = path.join(parsed.dir, `processed-${parsed.name}.png`);
-
-  try {
-    await sharp(filePath)
-      .resize(512, 512, { fit: 'cover', position: 'center' })
-      .png({ quality: 90 })
-      .toFile(outPath);
-
-    // Remove original uploaded raw file
-    fs.unlinkSync(filePath);
-    return `/uploads/icons/${path.basename(outPath)}`;
-  } catch (err) {
-    console.error('Sharp icon processing error:', err);
-    // Fallback to original
-    return `/uploads/icons/${path.basename(filePath)}`;
-  }
+export async function processAppIcon(filePathOrUrl) {
+  if (!filePathOrUrl) return null;
+  return filePathOrUrl;
 }
 
 /**
- * Process uploaded banner to 1024x500 WebP format
+ * Process uploaded banner
  */
-export async function processBanner(filePath) {
-  if (!fs.existsSync(filePath)) return null;
-
-  const parsed = path.parse(filePath);
-  const outPath = path.join(parsed.dir, `processed-${parsed.name}.webp`);
-
-  try {
-    await sharp(filePath)
-      .resize(1024, 500, { fit: 'cover' })
-      .webp({ quality: 85 })
-      .toFile(outPath);
-
-    fs.unlinkSync(filePath);
-    return `/uploads/banners/${path.basename(outPath)}`;
-  } catch (err) {
-    console.error('Sharp banner processing error:', err);
-    return `/uploads/banners/${path.basename(filePath)}`;
-  }
+export async function processBanner(filePathOrUrl) {
+  if (!filePathOrUrl) return null;
+  return filePathOrUrl;
 }
 
 /**
  * Log admin activity to audit log
  */
-export function logAdminAction(adminId, actionType, targetType, targetId, details = {}) {
+export async function logAdminAction(adminId, actionType, targetType, targetId, details = {}) {
   try {
-    db.prepare(`
-      INSERT INTO admin_action_logs (admin_id, action_type, target_type, target_id, details)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(adminId, actionType, targetType, targetId, JSON.stringify(details));
+    await queryRun(
+      `INSERT INTO admin_action_logs (admin_id, action_type, target_type, target_id, details)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [adminId, actionType, targetType, targetId, JSON.stringify(details)]
+    );
   } catch (err) {
     console.error('Failed to log admin action:', err);
   }
@@ -98,12 +64,13 @@ export function logAdminAction(adminId, actionType, targetType, targetId, detail
 /**
  * Create an in-app notification for a user
  */
-export function createNotification(userId, title, body, type = 'info', data = {}) {
+export async function createNotification(userId, title, body, type = 'info', data = {}) {
   try {
-    db.prepare(`
-      INSERT INTO notifications (user_id, title, body, type, data)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(userId, title, body, type, JSON.stringify(data));
+    await queryRun(
+      `INSERT INTO notifications (user_id, title, body, type, data)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [userId, title, body, type, JSON.stringify(data)]
+    );
   } catch (err) {
     console.error('Failed to create notification:', err);
   }
@@ -112,20 +79,27 @@ export function createNotification(userId, title, body, type = 'info', data = {}
 /**
  * Recalculate average rating and total reviews for an app
  */
-export function recalculateAppRating(appId) {
-  const stats = db.prepare(`
-    SELECT
-      COUNT(*) as count,
-      COALESCE(AVG(rating), 0.0) as avg
-    FROM reviews
-    WHERE app_id = ? AND status = 'approved'
-  `).get(appId);
+export async function recalculateAppRating(appId) {
+  try {
+    const stats = await queryOne(
+      `SELECT
+        COUNT(*)::int as count,
+        COALESCE(AVG(rating), 0.0) as avg
+       FROM reviews
+       WHERE app_id = $1 AND status = 'approved'`,
+      [appId]
+    );
 
-  const roundedAvg = Math.round(stats.avg * 10) / 10;
+    const count = stats ? Number(stats.count) : 0;
+    const roundedAvg = stats ? Math.round(Number(stats.avg) * 10) / 10 : 0.0;
 
-  db.prepare(`
-    UPDATE apps
-    SET average_rating = ?, total_reviews = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `).run(roundedAvg, stats.count, appId);
+    await queryRun(
+      `UPDATE apps
+       SET average_rating = $1, total_reviews = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [roundedAvg, count, appId]
+    );
+  } catch (err) {
+    console.error('Failed to recalculate app rating:', err);
+  }
 }
